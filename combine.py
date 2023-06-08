@@ -1,6 +1,7 @@
 import asyncio
 import gzip
 import shelve
+import multiprocessing as mp 
 from threading import Lock, Thread
 
 from joblib import Parallel,delayed
@@ -12,7 +13,7 @@ FILE_NAMES = [READ+s+'.txt.gz' for s in ['auth', 'dns', 'flows', 'proc']]
 IO_HANDLES = {i:gzip.open(f, 'rt') for i,f in enumerate(FILE_NAMES)}
 LABELS = gzip.open(READ+'redteam.txt.gz', 'rt')
 
-MAX_CACHE = 2**14
+MAX_CACHE = 2**16
 
 # TODO change flag on shelves to 'c' when done debugging
 NID_MAP = shelve.open(WRITE+'nid_map.db', 'c', writeback=True)
@@ -29,6 +30,7 @@ EDGE_MAP.write_cache = dict() # So we can specify what actually needs writing
 
 SPLIT = 3600 # Arbitrarally set to 1hrs per file
 FLUSH_AFTER = float('inf') # Doesn't seem to be a problem on this machine
+MAX_SUBPROCS = 32
 
 '''
 Example of redlog and corresponding auth log
@@ -43,6 +45,9 @@ def get_nid(node_str):
     global NID_MAP, NUM_NODES
     if node_str == '?':
         return None 
+
+    node_str = node_str.replace('$', '')
+    node_str = node_str.split('@')[0]
 
     if (nid := NID_MAP.get(node_str)) is None:
         # Not totally sure if shelve is thread-safe so 
@@ -59,6 +64,7 @@ def get_nid(node_str):
     if len(NID_MAP.cache) > MAX_CACHE:
         try:
             NID_LOCK.acquire()
+            print("syncing nids")
             NID_MAP.cache = NID_MAP.write_cache
             NID_MAP.sync()
             NID_MAP.write_cache = dict()
@@ -84,6 +90,7 @@ def get_edge_type(edge_str):
 
     if len(EDGE_MAP.cache) > MAX_CACHE:
         try: 
+            print("syncing eids")
             EDGE_LOCK.acquire()
             EDGE_MAP.cache = EDGE_MAP.write_cache 
             EDGE_MAP.sync()
@@ -229,7 +236,12 @@ def parse_all():
                 (ts, edge, ntypes, oh, val, label)
             )
             line = IO_HANDLES[idx].readline().strip()
-            ts, edge, ntypes, oh, val, label = parsers[idx](line, cur_red)
+            
+            # Check there is still data to read
+            if line:
+                ts, edge, ntypes, oh, val, label = parsers[idx](line, cur_red)
+            else:
+                break 
 
         return ret_val, line, idx
 
@@ -248,6 +260,7 @@ def parse_all():
             f.write(f'{e[0]},{e[1]},{oh},{e[3]},{e[4]},{int(e[5])}\n')
 
         #f.write(out_str)
+        print(f"Finished writing {f.name.split('/')[-1]}")
         f.close()
         del edges 
 
@@ -259,7 +272,7 @@ def parse_all():
     # Approx end from zcat dns.txt.gz | tail 
     prog = tqdm(desc='Seconds parsed', total=5011199)
     file_num = 0
-    t = None 
+    writers = []
     while IO_HANDLES: 
         response = [ 
             parse_one_second(idx, lines[idx], cur_time, cur_red)
@@ -304,14 +317,15 @@ def parse_all():
         if cur_time == (st_time + SPLIT): 
             # Multithreading seems to just slow stuff down 
             # since the threads share the same IO buffer
-            if t: 
-                t.join() 
+            if len(writers) > MAX_SUBPROCS: 
+                writers.pop(0).join()
 
-            t = Thread(
+            p = mp.Process(
                 group=None, target=flush, 
                 args=(cur_file, buffer)
             )
-            t.start()
+            p.start()
+            writers.append(p)
 
             file_num += 1
             buffer = []
@@ -328,4 +342,5 @@ def parse_all():
     EDGE_MAP.close()
     cur_file.close()
 
-parse_all()
+if __name__ == '__main__':
+    parse_all()
