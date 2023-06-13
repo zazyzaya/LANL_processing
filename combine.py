@@ -7,6 +7,8 @@ from threading import Lock, Thread
 from joblib import Parallel,delayed
 from tqdm import tqdm 
 
+from globals import * 
+
 READ = '/home/ead/datasets/LANL15/'
 WRITE = 'output/'
 FILE_NAMES = [READ+s+'.txt.gz' for s in ['auth', 'dns', 'flows', 'proc']]
@@ -270,10 +272,10 @@ def parse_all():
     red_time = int(cur_red[0])
 
     # Approx end from zcat dns.txt.gz | tail 
-    prog = tqdm(desc='Seconds parsed', total=5011199)
+    prog = tqdm(desc='Seconds parsed', total=NUM_SECONDS)
     file_num = 0
     writers = []
-    while IO_HANDLES: 
+    while cur_time <= NUM_SECONDS: 
         response = [ 
             parse_one_second(idx, lines[idx], cur_time, cur_red)
             for idx in IO_HANDLES.keys()
@@ -285,6 +287,10 @@ def parse_all():
             buffer += edges[i]
             
             # Close any files that finished
+            # This does not appear to work, so after 
+            # it finished running, I just took the last time stamp
+            # and made the loop check for that. leaving this here
+            # just in case it breaks something to take it out
             if not last_lines[i]:
                 IO_HANDLES[idxs[i]].close()
                 del IO_HANDLES[idxs[i]]
@@ -335,6 +341,7 @@ def parse_all():
             cur_file = open(f'{WRITE}/{file_num}.txt', 'w+')
 
     prog.close()
+    [w.join() for w in writers]
 
     # One last flush to finish it off, then we're done 
     flush(cur_file, buffer)
