@@ -4,7 +4,8 @@ import shelve
 import multiprocessing as mp 
 from threading import Lock, Thread
 
-from joblib import Parallel,delayed
+import torch 
+from torch_geometric.data import Data
 from tqdm import tqdm 
 
 from globals import * 
@@ -19,13 +20,11 @@ MAX_CACHE = 2**16
 
 # TODO change flag on shelves to 'c' when done debugging
 NID_MAP = shelve.open(WRITE+'nid_map.db', 'c', writeback=True)
-NUM_NODES = len(NID_MAP)    # loads full db into mem if exists
 NID_MAP.cache = dict()      # Empty cache if this happens ^
 NID_LOCK = Lock()
 NID_MAP.write_cache = dict()
 
 EDGE_MAP = shelve.open(WRITE+'eid_map.db', 'c', writeback=True)
-NUM_ETYPES = len(EDGE_MAP)  # loads full db into mem if exists
 EDGE_MAP.cache = dict()     # Empty cache if this happens ^
 EDGE_LOCK = Lock()
 EDGE_MAP.write_cache = dict() # So we can specify what actually needs writing
@@ -142,19 +141,19 @@ def parse_auth(line, next_mal):
 
     return \
         int(ts), \
-        (
+        [
             snid, 
             dnid
-        ), \
-        (
+        ], \
+        [
             src_x,
             dst_x
-        ), \
-        (
+        ], \
+        [
             get_edge_type(proto), 
             get_edge_type(a_type), 
             get_edge_type(orientation)
-        ), (0,0,0), is_mal 
+        ], [0,0,0], is_mal 
 
 def parse_dns(line, *args):
     '''
@@ -173,10 +172,10 @@ def parse_dns(line, *args):
         return int(ts), None, None, None, None, None
     
     return int(ts), \
-        (snid, dnid), \
-        (src_x, dst_x), \
-        (get_edge_type('DNS'),), \
-        (0,0,0), False
+        [snid, dnid], \
+        [src_x, dst_x], \
+        [get_edge_type('DNS')], \
+        [0,0,0], False
 
 def parse_flows(line, *args):
     '''
@@ -199,10 +198,10 @@ def parse_flows(line, *args):
         return int(ts), None, None, None, None, None
     
     return int(ts), \
-        (snid, dnid), \
-        (src_x, dst_x), \
-        (get_edge_type(proto),), \
-        (int(duration), int(n_pkts), int(n_bytes)), \
+        [snid, dnid], \
+        [src_x, dst_x], \
+        [get_edge_type(proto)], \
+        [int(duration), int(n_pkts), int(n_bytes)], \
         False 
 
 def parse_proc(line, *args):
@@ -230,15 +229,15 @@ def parse_proc(line, *args):
         return int(ts), None, None, None, None, None
     
     return int(ts), \
-        (snid, dnid), \
-        (src_x, dst_x), \
-        (get_edge_type(p), get_edge_type(st_en)), \
-        tuple(), False 
+        [snid, dnid], \
+        [src_x, dst_x], \
+        [get_edge_type(p), get_edge_type(st_en)], \
+        [], False 
 
 
 def parse_all():
     cur_time = st_time = 0 
-    cur_file = open(f'{WRITE}/{cur_time}.txt', 'w+')
+    cur_file = f'{WRITE}/{cur_time}.pt'
     buffer = []
 
     parsers = {
@@ -279,17 +278,43 @@ def parse_all():
         # Checking we're not touching mem that's allocated in the main thread
         #print(id(edges), 'in thread') 
         #out_str = ''
+        src,dst = [],[]
+        edge_feats = []
+        ts = []
+        ys = []
+
+        e = edges.pop(0) 
         while edges:
-            e = edges.pop(0) 
+            t,(s,d),_,oh,quant,y = e 
             
-            # Filter out missing values 
-            oh = tuple([val for val in e[3] if val is not None])
-            f.write(f'{e[0]},{e[1]},{e[2]},{oh},{e[4]},{int(e[5])}\n')
+            oh = [val for val in oh if val is not None]
+            ef = torch.zeros(NUM_ETYPES + NUM_QUANT)
+            ef[oh] = 1. 
+            ef[-3:] = torch.tensor(quant)
+            edge_feats.append(ef)
+
+            src.append(s)
+            dst.append(d)
+            ts.append(t)
+            ys.append(y)
+
+            e = edges.pop(0)
+
+        ys = torch.tensor(ys)
+        if ys.sum() == 0:
+            ys = None 
+
+        torch.save(
+            Data(
+                edge_index = torch.tensor([src,dst]),
+                edge_attr = torch.stack(edge_feats),
+                ts = torch.tensor(ts),
+                ys = ys 
+            ), f
+        )
 
         #f.write(out_str)
-        print(f"Finished writing {f.name.split('/')[-1]}")
-        f.close()
-        del edges 
+        print(f"Finished writing {f.split('/')[-1]}")
 
 
     cur_red = LABELS.readline().strip()
@@ -366,7 +391,7 @@ def parse_all():
             #print(id(buffer), 'out of thread')
             
             st_time = cur_time
-            cur_file = open(f'{WRITE}/{file_num}.txt', 'w+')
+            cur_file = f'{WRITE}/{file_num}.pt'
 
     prog.close()
     [w.join() for w in writers]
@@ -375,7 +400,6 @@ def parse_all():
     flush(cur_file, buffer)
     NID_MAP.close()
     EDGE_MAP.close()
-    cur_file.close()
 
 if __name__ == '__main__':
     parse_all()

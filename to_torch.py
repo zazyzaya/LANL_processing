@@ -11,6 +11,7 @@ WORKERS = 32
 
 def load_one(idx,fname,write_to):
     f = open(fname, 'r')
+    stem = fname.split('/')[-1].split('.')[0]
     
     x = dict() 
     src,dst = [],[]
@@ -47,7 +48,10 @@ def load_one(idx,fname,write_to):
     for i in range(num_e):
         oh[i, one_hots[i]] = 1. 
     
-    quants = torch.tensor(quants)
+    # The duration, npkts, nbytes can vary so wildly
+    # Duration isn't as bad (0 - ~70), but the other two 
+    # range from 0 to 1e6, and 1e8 respectively 
+    quants = torch.log(torch.tensor(quants))
     
     ei = torch.tensor([src,dst])
     ys = None if sum(ys) == 0 else torch.tensor(ys)
@@ -56,12 +60,12 @@ def load_one(idx,fname,write_to):
 
     torch.save(
         Data(edge_index=ei, edge_attr=ew, y=ys, ts=ts),
-        write_to+str(idx)+'.pt'
+        write_to+stem+'.pt'
     )
 
     return x 
 
-def load_all(write_to='output/'):
+def load_all(write_to='torch_files/'):
     files = glob.glob(READ_FROM+'*.txt')
     xs = Parallel(n_jobs=WORKERS, prefer='processes')(
         delayed(load_one)(i,f,write_to) for i,f in enumerate(files)
