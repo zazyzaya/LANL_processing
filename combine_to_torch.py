@@ -235,6 +235,152 @@ def parse_proc(line, *args):
         [], False 
 
 
+def build_maps():
+    '''
+    Same as below but only builds shelve databases. Saves nothing else 
+    '''
+    cur_time = st_time = 0 
+    cur_file = f'{WRITE}/{cur_time}.pt'
+    buffer = []
+
+    parsers = {
+        0: parse_auth, 1: parse_dns, 
+        2: parse_flows, 3: parse_proc
+    }
+
+    lines = {
+        k:IO_HANDLES[k].readline().strip() 
+        for k in IO_HANDLES.keys()
+    }
+
+    def parse_one_second(idx, line, cur_time, cur_red):
+        ret_val = []
+        ts, edge, ntypes, oh, val, label = parsers[idx](line, cur_red)
+        
+        while ts == cur_time:
+            # All values other than ts will be None if missing data
+            if edge: 
+                ret_val.append(
+                    (ts, edge, ntypes, oh, val, label)
+                )
+            line = IO_HANDLES[idx].readline().strip()
+            
+            # Check there is still data to read
+            if line:
+                ts, edge, ntypes, oh, val, label = parsers[idx](line, cur_red)
+            else:
+                break 
+
+        return ret_val, line, idx
+
+    def flush(f, edges):
+        # Checking we're not touching mem that's allocated in the main thread
+        #print(id(edges), 'in thread') 
+        #out_str = ''
+        src,dst = [],[]
+        edge_feats = []
+        ts = []
+        ys = []
+
+        e = edges.pop(0) 
+        while edges:
+            t,(s,d),_,oh,quant,y = e 
+            
+            oh = [val for val in oh if val is not None]
+            ef = torch.zeros(NUM_ETYPES + NUM_QUANT)
+            ef[oh] = 1. 
+            ef[-3:] = torch.tensor(quant)
+            edge_feats.append(ef)
+
+            src.append(s)
+            dst.append(d)
+            ts.append(t)
+            ys.append(y)
+
+            e = edges.pop(0)
+
+        ys = torch.tensor(ys)
+        if ys.sum() == 0:
+            ys = None 
+
+        torch.save(
+            Data(
+                edge_index = torch.tensor([src,dst]),
+                edge_attr = torch.stack(edge_feats),
+                ts = torch.tensor(ts),
+                ys = ys 
+            ), f
+        )
+
+        #f.write(out_str)
+        print(f"Finished writing {f.split('/')[-1]}")
+
+
+    cur_red = LABELS.readline().strip()
+    cur_red = cur_red.split(',')
+    red_time = int(cur_red[0])
+
+    # Approx end from zcat dns.txt.gz | tail 
+    prog = tqdm(desc='Seconds parsed', total=NUM_SECONDS)
+    file_num = 0
+    writers = []
+    while cur_time <= NUM_SECONDS: 
+        response = [ 
+            parse_one_second(idx, lines[idx], cur_time, cur_red)
+            for idx in IO_HANDLES.keys()
+        ]
+
+        edges, last_lines, idxs = zip(*response)
+        for i in range(len(idxs)):
+            # Close any files that finished
+            # This does not appear to work, so after 
+            # it finished running, I just took the last time stamp
+            # and made the loop check for that. leaving this here
+            # just in case it breaks something to take it out
+            if not last_lines[i]:
+                IO_HANDLES[idxs[i]].close()
+                del IO_HANDLES[idxs[i]]
+
+            # Update last lines
+            else:
+                lines[idxs[i]] = last_lines[i]
+            
+        # Advance to next redteam event if the last one was captured
+        if red_time == cur_time:
+            cur_red = LABELS.readline().strip()
+            if cur_red:
+                cur_red = cur_red.split(',')
+                red_time = int(cur_red[0])
+            else: 
+                cur_red = [None] * 4 
+                red_time = -1 
+
+        '''
+        # If the buffer is full, write out edges
+        if len(buffer) >= FLUSH_AFTER:
+            flush(cur_file, buffer)
+        '''
+
+        # Go to next second
+        cur_time += 1
+        prog.update()
+
+        # If the timestamp is complete, ~write out edges~, and make new file 
+        if cur_time == (st_time + SPLIT): 
+            file_num += 1
+            buffer = []
+            
+            # Checking that buffer is a new memory address and 
+            # we aren't making race conditions in the worker thread
+            #print(id(buffer), 'out of thread')
+            
+            st_time = cur_time
+    prog.close()
+
+    # One last flush to finish it off, then we're done 
+    NID_MAP.close()
+    EDGE_MAP.close()
+
 def parse_all():
     cur_time = st_time = 0 
     cur_file = f'{WRITE}/{cur_time}.pt'
@@ -402,4 +548,5 @@ def parse_all():
     EDGE_MAP.close()
 
 if __name__ == '__main__':
+    build_maps()
     parse_all()
