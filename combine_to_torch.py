@@ -22,16 +22,18 @@ with open('maps/nid_map.csv', 'r') as f:
     line = f.readline()
 
     while line: 
-        s,i = line.split(',')[0]
-        NID_MAP[s] = i 
+        s,i = line.split(',')
+        NID_MAP[s] = int(i.strip())
+        line = f.readline()
 
 with open('maps/eid_map.csv', 'r') as f:
     EDGE_MAP = dict() 
     line = f.readline()
 
     while line: 
-        s,i = line.split(',')[0]
-        EDGE_MAP[s] = i 
+        s,i = line.split(',')
+        EDGE_MAP[s] = int(i.strip())
+        line = f.readline()
 
 SPLIT = 3600 # Arbitrarally set to 1hrs per file
 FLUSH_AFTER = float('inf') # Doesn't seem to be a problem on this machine
