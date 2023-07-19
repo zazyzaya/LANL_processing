@@ -1,5 +1,6 @@
 import asyncio
 import gzip
+import shelve
 import multiprocessing as mp 
 from threading import Lock, Thread
 
@@ -7,7 +8,7 @@ import torch
 from torch_geometric.data import Data
 from tqdm import tqdm 
 
-from globals import *
+from globals import NUM_SECONDS
 
 READ = '/home/ead/datasets/LANL15/'
 WRITE = 'output/'
@@ -17,21 +18,19 @@ LABELS = gzip.open(READ+'redteam.txt.gz', 'rt')
 
 MAX_CACHE = 2**16
 
-with open('maps/nid_map.csv', 'r') as f:
-    NID_MAP = dict() 
-    line = f.readline()
+# TODO change flag on shelves to 'c' when done debugging
+NID_MAP = shelve.open(WRITE+'nid_map.db', 'c', writeback=True)
+NID_MAP.cache = dict()      # Empty cache if this happens ^
+NID_LOCK = Lock()
+NID_MAP.write_cache = dict()
+NUM_NODES = len(NID_MAP)
 
-    while line: 
-        s,i = line.split(',')[0]
-        NID_MAP[s] = i 
-
-with open('maps/eid_map.csv', 'r') as f:
-    EDGE_MAP = dict() 
-    line = f.readline()
-
-    while line: 
-        s,i = line.split(',')[0]
-        EDGE_MAP[s] = i 
+EDGE_MAP = shelve.open(WRITE+'eid_map.db', 'c', writeback=True)
+EDGE_MAP.cache = dict()     # Empty cache if this happens ^
+EDGE_LOCK = Lock()
+EDGE_MAP.write_cache = dict() # So we can specify what actually needs writing
+NUM_ETYPES = len(EDGE_MAP)
+NUM_QUANT = 3
 
 SPLIT = 3600 # Arbitrarally set to 1hrs per file
 FLUSH_AFTER = float('inf') # Doesn't seem to be a problem on this machine
@@ -47,10 +46,63 @@ Seems like src and dst user are very often the same?
 '''
 
 def get_nid(node_str):
-    return NID_MAP.get(node_str)
+    global NID_MAP, NUM_NODES
+    if node_str == '?':
+        return None 
+
+    node_str = node_str.replace('$', '')
+    node_str = node_str.split('@')[0]
+
+    if (nid := NID_MAP.get(node_str)) is None:
+        # Not totally sure if shelve is thread-safe so 
+        # being abundantly cautious
+        try:
+            NID_LOCK.acquire() 
+            nid = NUM_NODES
+            NUM_NODES += 1
+            NID_MAP[node_str] = nid 
+            NID_MAP.write_cache[node_str] = nid 
+        finally: 
+            NID_LOCK.release()
+
+    if len(NID_MAP.cache) > MAX_CACHE:
+        try:
+            NID_LOCK.acquire()
+            print("syncing nids")
+            NID_MAP.cache = NID_MAP.write_cache
+            NID_MAP.sync()
+            NID_MAP.write_cache = dict()
+        finally:
+            NID_LOCK.release()
+
+    return nid 
 
 def get_edge_type(edge_str):
-    return EDGE_MAP.get(edge_str)
+    global EDGE_MAP, NUM_ETYPES
+    if edge_str == '?': 
+        return None 
+
+    if (eid := EDGE_MAP.get(edge_str)) is None:
+        try:
+            EDGE_LOCK.acquire()
+            eid = NUM_ETYPES
+            NUM_ETYPES += 1
+            EDGE_MAP[edge_str] = eid
+            EDGE_MAP.write_cache[edge_str] = eid 
+        finally:
+            EDGE_LOCK.release()
+
+    if len(EDGE_MAP.cache) > MAX_CACHE:
+        try: 
+            print("syncing eids")
+            EDGE_LOCK.acquire()
+            EDGE_MAP.cache = EDGE_MAP.write_cache 
+            EDGE_MAP.sync()
+            EDGE_MAP.write_cache = dict()
+        finally:
+            EDGE_LOCK.release()
+
+    return eid 
 
 def get_ntype(node_str):
     if node_str.startswith('U'):
@@ -185,7 +237,11 @@ def parse_proc(line, *args):
         [get_edge_type(p), get_edge_type(st_en)], \
         [], False 
 
-def parse_all():
+
+def build_maps():
+    '''
+    Same as below but only builds shelve databases. Saves nothing else 
+    '''
     cur_time = st_time = 0 
     cur_file = f'{WRITE}/{cur_time}.pt'
     buffer = []
@@ -221,10 +277,6 @@ def parse_all():
         return ret_val, line, idx
 
     def flush(f, edges):
-        '''
-        Edges formatted as 
-        ts,(src,dst),(src_x, dst_x),(one hot idxs),(quantitative values),y
-        '''
         # Checking we're not touching mem that's allocated in the main thread
         #print(id(edges), 'in thread') 
         #out_str = ''
@@ -283,9 +335,6 @@ def parse_all():
 
         edges, last_lines, idxs = zip(*response)
         for i in range(len(idxs)):
-            # Add edge data 
-            buffer += edges[i]
-            
             # Close any files that finished
             # This does not appear to work, so after 
             # it finished running, I just took the last time stamp
@@ -319,20 +368,8 @@ def parse_all():
         cur_time += 1
         prog.update()
 
-        # If the timestamp is complete, write out edges, and make new file 
+        # If the timestamp is complete, ~write out edges~, and make new file 
         if cur_time == (st_time + SPLIT): 
-            # Multithreading seems to just slow stuff down 
-            # since the threads share the same IO buffer
-            if len(writers) > MAX_SUBPROCS: 
-                writers.pop(0).join()
-
-            p = mp.Process(
-                group=None, target=flush, 
-                args=(cur_file, buffer)
-            )
-            p.start()
-            writers.append(p)
-
             file_num += 1
             buffer = []
             
@@ -341,15 +378,11 @@ def parse_all():
             #print(id(buffer), 'out of thread')
             
             st_time = cur_time
-            cur_file = f'{WRITE}/{file_num}.pt'
-
     prog.close()
-    [w.join() for w in writers]
 
     # One last flush to finish it off, then we're done 
-    flush(cur_file, buffer)
     NID_MAP.close()
     EDGE_MAP.close()
 
-if __name__ == '__main__': 
-    parse_all()
+if __name__ == '__main__':
+    build_maps()
