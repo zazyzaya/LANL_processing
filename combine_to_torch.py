@@ -49,6 +49,12 @@ Seems like src and dst user are very often the same?
 '''
 
 def get_nid(node_str):
+    if node_str == '?':
+        return None 
+
+    node_str = node_str.replace('$', '')
+    node_str = node_str.split('@')[0]
+    
     return NID_MAP.get(node_str)
 
 def get_edge_type(edge_str):
