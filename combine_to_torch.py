@@ -58,6 +58,10 @@ def get_nid(node_str):
     return NID_MAP.get(node_str)
 
 def get_edge_type(edge_str):
+    # Make all versions of MICROSOFT_AUTHENTICATION_PACKAGE 
+    # which appears as: MICROSOFT_AUTHENTICATION_PA, MICROSOFT_AUTH, etc. 
+    # appear as the same edge 
+    edge_str = edge_str.split('_')[0]
     return EDGE_MAP.get(edge_str)
 
 def get_ntype(node_str):
@@ -109,6 +113,7 @@ def parse_auth(line, next_mal):
             dst_x
         ], \
         [
+            get_edge_type("AUTH"),
             get_edge_type(proto), 
             get_edge_type(a_type), 
             get_edge_type(orientation)
@@ -159,7 +164,10 @@ def parse_flows(line, *args):
     return int(ts), \
         [snid, dnid], \
         [src_x, dst_x], \
-        [get_edge_type(proto)], \
+        [
+            get_edge_type("FLOW"),
+            get_edge_type(proto)
+        ], \
         [int(duration), int(n_pkts), int(n_bytes)], \
         False 
 
@@ -248,7 +256,8 @@ def parse_all():
             oh = [val for val in oh if val is not None]
             ef = torch.zeros(NUM_ETYPES + NUM_QUANT)
             ef[oh] = 1. 
-            ef[-3:] = torch.tensor(quant)
+            # 1+ to fix log(0) errors, log bc bytes can span huge ranges
+            ef[-3:] = (1+torch.tensor(quant)).log() 
             edge_feats.append(ef)
 
             src.append(s)
@@ -266,7 +275,7 @@ def parse_all():
             Data(
                 edge_index = torch.tensor([src,dst]),
                 edge_attr = torch.stack(edge_feats),
-                ts = torch.tensor(ts),
+                ts = torch.tensor(ts) / (60*60*24),
                 ys = ys 
             ), f
         )
@@ -317,12 +326,6 @@ def parse_all():
                 cur_red = [None] * 4 
                 red_time = -1 
 
-        '''
-        # If the buffer is full, write out edges
-        if len(buffer) >= FLUSH_AFTER:
-            flush(cur_file, buffer)
-        '''
-
         # Go to next second
         cur_time += 1
         prog.update()
@@ -356,8 +359,6 @@ def parse_all():
 
     # One last flush to finish it off, then we're done 
     flush(cur_file, buffer)
-    NID_MAP.close()
-    EDGE_MAP.close()
 
 if __name__ == '__main__': 
     parse_all()

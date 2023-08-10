@@ -1,5 +1,5 @@
 NUM_SECONDS = 5011199
-NUM_ETYPES = 49 # Size of one-hot edge features
+NUM_ETYPES = 34 # Size of one-hot edge features
 NUM_QUANT = 3   # Size of quantitative edge features
 NUM_NODES = 29980
 NUM_NODE_TYPES = 2 # User, computer
